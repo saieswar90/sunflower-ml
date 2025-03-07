@@ -1,75 +1,67 @@
-from flask import Flask, request, jsonify
-import numpy as np
 import tensorflow as tf
-from PIL import Image
+import numpy as np
+import cv2
 import os
+from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# Model configuration (relative path)
-MODEL_DIR = os.path.join(os.path.dirname(__file__), 'models')
-TFLITE_MODEL_PATH = os.path.join(MODEL_DIR, "sunflower_leaf_classifier.tflite")
+# Define the model path
+MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', 'sunflower_leaf_classifier.tflite')
 
-# Verify model exists
-if not os.path.exists(TFLITE_MODEL_PATH):
-    raise FileNotFoundError(f"Model not found at: {TFLITE_MODEL_PATH}")
-
-# Load TFLite model
-interpreter = tf.lite.Interpreter(model_path=TFLITE_MODEL_PATH)
+# Load the TFLite model
+interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
 interpreter.allocate_tensors()
+
+# Get input and output details
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
 
-# Class mapping based on training data
-CLASS_LABELS = {
-    0: "Leaf Scars",
-    1: "Gray Mold",
-    2: "Fresh Leaf",
-    3: "Downy Mildew"
+# Labels and suggestions
+labels = ["Leaf Scars", "Gray Mold", "Fresh Leaf", "Downy Mildew"]
+suggestions = {
+    "Leaf Scars": "Remove affected leaves and apply neem oil.",
+    "Gray Mold": "Use organic fungicide and improve airflow.",
+    "Fresh Leaf": "Plant is healthy - maintain regular care.",
+    "Downy Mildew": "Apply copper-based fungicide and avoid wet foliage."
 }
 
-# Treatment suggestions
-TREATMENT_SUGGESTIONS = {
-    0: "Remove affected leaves and apply neem oil",
-    1: "Use organic fungicide and improve airflow",
-    2: "Plant is healthy - maintain regular care",
-    3: "Apply copper-based fungicide and avoid wet foliage"
-}
+@app.route('/')
+def home():
+    return jsonify({"message": "Sunflower Disease Detection API is Running!"})
 
 @app.route('/predict_sunflower', methods=['POST'])
-def predict_sunflower():
-    if 'image' not in request.files:
-        return jsonify({'error': 'No image uploaded'}), 400
+def predict_disease():
+    if 'file' not in request.files:
+        return jsonify({"error": "No file provided"}), 400
 
-    file = request.files['image']
-    if not file.filename.lower().endswith(('.png', '.jpg', '.jpeg')):
-        return jsonify({'error': 'Invalid file format'}), 400
-
+    file = request.files['file']
+    
     try:
-        # Preprocess image
-        img = Image.open(file.stream).convert('RGB')
-        img = img.resize((input_details[0]['shape'][2], input_details[0]['shape'][1]))
-        img_array = np.array(img) / 255.0  # Adjust based on model's normalization
-        img_array = np.expand_dims(img_array, axis=0).astype(input_details[0]['dtype'])
-
-        # Run inference
-        interpreter.set_tensor(input_details[0]['index'], img_array)
-        interpreter.invoke()
-        output = interpreter.get_tensor(output_details[0]['index'])[0]
-
-        # Process results
-        predicted_class = np.argmax(output)
-        confidence = round(output[predicted_class] * 100, 2)
+        # Read and preprocess the image
+        image = cv2.imdecode(np.frombuffer(file.read(), np.uint8), cv2.IMREAD_COLOR)
+        image = cv2.resize(image, (224, 224)) / 255.0  # Resize and normalize
+        image = np.expand_dims(image, axis=0).astype(np.float32)  # Add batch dimension
         
+        # Run inference
+        interpreter.set_tensor(input_details[0]['index'], image)
+        interpreter.invoke()
+        output_data = interpreter.get_tensor(output_details[0]['index'])
+        
+        # Get prediction
+        predicted_class = np.argmax(output_data)
+        confidence = float(np.max(output_data))
+        prediction = labels[predicted_class]
+        suggestion = suggestions[prediction]
+
         return jsonify({
-            'class_id': int(predicted_class),
-            'class_name': CLASS_LABELS[predicted_class],
-            'confidence': f"{confidence}%",
-            'suggestion': TREATMENT_SUGGESTIONS[predicted_class]
-        })
+            "prediction": prediction,
+            "confidence": confidence,
+            "suggestion": suggestion
+        }), 200
 
     except Exception as e:
-        return jsonify({'error': f'Prediction failed: {str(e)}'}), 500
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5000)
